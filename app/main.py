@@ -1,118 +1,124 @@
 """
-Main Streamlit Application for Co-Investigator Agent
+Multi-Agent Streamlit Application for Co-Investigator
 
-A State-Aware Research Assistant with Human-in-the-Loop capabilities.
+Features:
+- Conversational interface with memory
+- Multiple specialized agents
+- Dynamic task modification
+- Real-time agent visibility
 """
 import sys
-import logging
 from pathlib import Path
-
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
+import logging
 
-from app.components.prompt_input import render_prompt_input
-from app.components.execution_graph import (
-    render_execution_graph,
-    render_task_list,
-    render_results_summary,
-)
-from app.components.hitl_panel import render_hitl_panel, render_conflict_summary
-from agent.graph import run_agent, resume_agent
+from agent.multi_agent import MultiAgentOrchestrator
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
-    page_title="Co-Investigator | Research Assistant",
+    page_title="Co-Investigator | Multi-Agent Research Assistant",
     page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 # Custom CSS
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
+    .agent-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 15px;
+        font-size: 12px;
         font-weight: bold;
-        color: #1f77b4;
-        margin-bottom: 1rem;
+        margin-right: 8px;
     }
-    .sub-header {
-        font-size: 1.2rem;
-        color: #666;
-        margin-bottom: 2rem;
-    }
-    .stButton button {
-        border-radius: 20px;
-    }
-    .report-container {
-        background-color: #f8f9fa;
+    .agent-planner { background-color: #e3f2fd; color: #1565c0; }
+    .agent-researcher { background-color: #e8f5e9; color: #2e7d32; }
+    .agent-validator { background-color: #fff3e0; color: #ef6c00; }
+    .agent-synthesizer { background-color: #f3e5f5; color: #7b1fa2; }
+    .agent-orchestrator { background-color: #fce4ec; color: #c2185b; }
+
+    .chat-message {
+        padding: 15px;
         border-radius: 10px;
-        padding: 20px;
-        margin-top: 20px;
+        margin: 10px 0;
+    }
+    .user-message {
+        background-color: #e3f2fd;
+        color: #000000;
+        margin-left: 20%;
+    }
+    .assistant-message {
+        background-color: #f5f5f5;
+        color: #000000;
+        margin-right: 20%;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-def init_session_state():
-    """Initialize session state variables."""
-    if "agent_state" not in st.session_state:
-        st.session_state.agent_state = None
-    if "session_id" not in st.session_state:
-        st.session_state.session_id = None
-    if "execution_status" not in st.session_state:
-        st.session_state.execution_status = "idle"
-    if "query_history" not in st.session_state:
-        st.session_state.query_history = []
+def get_agent_badge(agent_name: str) -> str:
+    """Get HTML badge for agent type."""
+    badges = {
+        "PLANNER": ("📋", "agent-planner"),
+        "RESEARCHER": ("🔍", "agent-researcher"),
+        "VALIDATOR": ("⚠️", "agent-validator"),
+        "SYNTHESIZER": ("📝", "agent-synthesizer"),
+        "CLARIFIER": ("❓", "agent-orchestrator"),
+        "ORCHESTRATOR": ("🎯", "agent-orchestrator"),
+    }
+    icon, css_class = badges.get(agent_name, ("🤖", "agent-orchestrator"))
+    return f'<span class="agent-badge {css_class}">{icon} {agent_name}</span>'
 
 
-def handle_hitl_response(response: str):
-    """Handle user response at HITL checkpoint."""
-    st.session_state.hitl_response = response
-    st.session_state.execution_status = "resuming"
+def init_session():
+    """Initialize session state."""
+    if "orchestrator" not in st.session_state:
+        st.session_state.orchestrator = MultiAgentOrchestrator()
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "current_plan" not in st.session_state:
+        st.session_state.current_plan = None
 
 
 def main():
-    """Main application entry point."""
-    init_session_state()
+    init_session()
 
     # Header
-    st.markdown('<div class="main-header">🔬 Co-Investigator</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="sub-header">State-Aware AI Research Assistant with Human-in-the-Loop</div>',
-        unsafe_allow_html=True,
-    )
+    st.title("🔬 Co-Investigator")
+    st.markdown("*Multi-Agent Biomedical Research Assistant*")
 
     # Sidebar
     with st.sidebar:
-        st.markdown("### About")
-        st.markdown("""
-        This AI assistant helps you conduct biomedical research by:
+        st.markdown("### 🤖 Agent Status")
 
-        - 📋 **Planning** - Breaking down complex queries
-        - 🔍 **Retrieving** - Querying ClinGen, CIViC, Reactome
-        - ⚠️ **Validating** - Detecting data conflicts
-        - 👤 **Collaborating** - Seeking your input at key points
-        - 🌐 **Enriching** - Adding researcher data from OpenAlex
-        - 📝 **Synthesizing** - Generating comprehensive reports
+        # Show current session info
+        st.markdown(f"**Session:** `{st.session_state.orchestrator.session_id[:12]}...`")
+
+        # Show memory status
+        memory = st.session_state.orchestrator.memory
+        st.markdown(f"**Messages:** {len(memory.messages)}")
+        st.markdown(f"**Completed Tasks:** {len(memory.completed_tasks)}")
+        st.markdown(f"**Pending Tasks:** {len(memory.pending_tasks)}")
+
+        st.markdown("---")
+
+        st.markdown("### 📊 Available Agents")
+        st.markdown("""
+        - 📋 **Planner**: Creates research plans
+        - 🔍 **Researcher**: Queries databases
+        - ⚠️ **Validator**: Checks data quality
+        - 📝 **Synthesizer**: Creates reports
         """)
 
         st.markdown("---")
 
-        st.markdown("### Session Info")
-        if st.session_state.session_id:
-            st.code(st.session_state.session_id)
-            st.caption(f"Status: {st.session_state.execution_status}")
-
-        st.markdown("---")
-
-        st.markdown("### Data Sources")
+        st.markdown("### 💾 Data Sources")
         st.markdown("""
         - ClinGen (Gene-Disease)
         - CIViC (Clinical Evidence)
@@ -122,124 +128,203 @@ def main():
         - PubMed (Abstracts)
         """)
 
-    # Main content area
+        st.markdown("---")
+
+        # Reset button
+        if st.button("🔄 New Session", use_container_width=True):
+            st.session_state.orchestrator = MultiAgentOrchestrator()
+            st.session_state.messages = []
+            st.session_state.current_plan = None
+            st.rerun()
+
+    # Main chat interface
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        # Query input (only show if not executing)
-        if st.session_state.execution_status == "idle":
-            query = render_prompt_input()
+        st.markdown("### 💬 Research Chat")
 
-            if query:
-                # Start execution
-                st.session_state.query_history.append(query)
-                st.session_state.execution_status = "running"
+        # Display chat history
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                st.markdown(
+                    f'<div class="chat-message user-message"><b>You:</b> {msg["content"]}</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                agent_badge = get_agent_badge(msg.get("agent", "ORCHESTRATOR"))
+                st.markdown(
+                    f'<div class="chat-message assistant-message">{agent_badge}<br><br>{msg["content"]}</div>',
+                    unsafe_allow_html=True
+                )
 
-                with st.spinner("Starting research agent..."):
-                    result = run_agent(query)
+        # Chat input
+        user_input = st.chat_input("Ask a research question or give instructions...")
 
-                    st.session_state.session_id = result["session_id"]
-                    st.session_state.agent_state = result.get("state", {})
+        if user_input:
+            # Add user message
+            st.session_state.messages.append({
+                "role": "user",
+                "content": user_input
+            })
 
-                    if result["status"] == "paused":
-                        st.session_state.execution_status = "hitl_pending"
-                    elif result["status"] == "completed":
-                        st.session_state.execution_status = "completed"
-                    else:
-                        st.session_state.execution_status = "error"
-                        st.error(f"Error: {result.get('error', 'Unknown error')}")
+            # Process with multi-agent system
+            with st.status("🤖 Orchestrating agents...", expanded=True) as status_container:
+                def update_status(msg):
+                    status_container.write(f"🔄 {msg}")
+                    status_container.update(label=f"🤖 {msg}")
+                response = st.session_state.orchestrator.process_message(
+                    user_input, 
+                    status_callback=update_status
+                )
+                status_container.update(label="✅ Agent processing complete!", state="complete", expanded=False)
 
-                st.rerun()
+            # Add assistant response
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response.get("message", ""),
+                "agent": response.get("agent_used", "ORCHESTRATOR")
+            })
 
-        # Show execution progress
-        elif st.session_state.execution_status in ["running", "hitl_pending", "completed"]:
-            state = st.session_state.agent_state or {}
+            # Update plan if available
+            if response.get("plan"):
+                st.session_state.current_plan = response["plan"]
 
-            # Execution graph
-            render_execution_graph(
-                current_node=state.get("current_node"),
-                execution_history=state.get("execution_history", []),
-            )
-
-            # Task list
-            render_task_list(state.get("plan"))
-
-            # Results summary
-            if state.get("results"):
-                render_results_summary(state.get("results"))
-
-            # HITL panel
-            if st.session_state.execution_status == "hitl_pending":
-                checkpoint = state.get("hitl_checkpoint", {})
-                if checkpoint:
-                    render_hitl_panel(checkpoint, handle_hitl_response)
-
-            # Handle HITL response
-            if st.session_state.execution_status == "resuming":
-                response = st.session_state.get("hitl_response", "")
-
-                with st.spinner("Resuming research..."):
-                    result = resume_agent(
-                        session_id=st.session_state.session_id,
-                        user_feedback=response,
-                        current_state=st.session_state.agent_state,
-                    )
-
-                    st.session_state.agent_state = result.get("state", {})
-
-                    if result["status"] == "completed":
-                        st.session_state.execution_status = "completed"
-                    else:
-                        st.session_state.execution_status = "error"
-
-                st.rerun()
-
-            # Final report
-            if st.session_state.execution_status == "completed":
-                final_report = state.get("final_report")
-                if final_report:
-                    st.markdown("---")
-                    st.markdown("## 📄 Research Report")
-                    st.markdown('<div class="report-container">', unsafe_allow_html=True)
-                    st.markdown(final_report)
-                    st.markdown('</div>', unsafe_allow_html=True)
-
-                    # Download button
-                    st.download_button(
-                        label="Download Report (Markdown)",
-                        data=final_report,
-                        file_name="research_report.md",
-                        mime="text/markdown",
-                    )
-
-                # New query button
-                if st.button("Start New Research", type="primary"):
-                    st.session_state.agent_state = None
-                    st.session_state.session_id = None
-                    st.session_state.execution_status = "idle"
-                    st.rerun()
+            st.rerun()
 
     with col2:
-        # Right panel - conflicts and details
-        if st.session_state.agent_state:
-            state = st.session_state.agent_state
+        # Show current plan
+        st.markdown("### 📋 Current Plan")
 
-            st.markdown("### Conflict Analysis")
-            render_conflict_summary(state.get("conflicts", []))
+        if st.session_state.current_plan:
+            plan = st.session_state.current_plan
 
-            if state.get("human_feedback"):
-                st.markdown("### Your Feedback")
-                st.info(state.get("human_feedback"))
+            st.markdown(f"**Goal:** {plan.get('research_goal', 'N/A')}")
+            st.markdown(f"**Complexity:** {plan.get('estimated_complexity', 'N/A')}")
 
-            # Debug info (collapsible)
-            with st.expander("Debug Info", expanded=False):
-                st.json({
-                    "session_id": st.session_state.session_id,
-                    "status": st.session_state.execution_status,
-                    "current_node": state.get("current_node"),
-                    "execution_history": state.get("execution_history"),
-                    "error": state.get("error"),
-                })
+            st.markdown("#### Tasks:")
+            for task in plan.get("sub_tasks", []):
+                task_id = task["task_id"]
+                if task_id in memory.completed_tasks:
+                    icon = "✅"
+                elif task_id in memory.pending_tasks:
+                    icon = "⏳"
+                else:
+                    icon = "📌"
+
+                with st.expander(f"{icon} {task_id}: {task['description'][:30]}..."):
+                    st.markdown(f"**Source:** {task['data_source']}")
+                    st.markdown(f"**Params:** {task.get('query_params', {})}")
+
+                    if task.get("depends_on"):
+                        st.markdown(f"**Depends on:** {task['depends_on']}")
+        else:
+            st.info("No plan yet. Ask a research question to get started!")
+
+        # Show collected data summary
+        st.markdown("### 📊 Collected Data")
+
+        if memory.collected_data:
+            for task_id, data in memory.collected_data.items():
+                with st.expander(f"📁 {task_id} ({data.get('count', 0)} records)"):
+                    st.json(data.get("data", [])[:3])
+        else:
+            st.info("No data collected yet.")
+
+    # Quick action buttons
+    st.markdown("---")
+    st.markdown("### ⚡ Quick Actions")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        if st.button("📋 Create Plan", use_container_width=True):
+            st.session_state.messages.append({
+                "role": "user",
+                "content": "Please create a research plan based on our conversation"
+            })
+            with st.status("🤖 Orchestrating agents...", expanded=True) as status_container:
+                def update_status(msg):
+                    status_container.write(f"🔄 {msg}")
+                    status_container.update(label=f"🤖 {msg}")
+                response = st.session_state.orchestrator.process_message(
+                    "Please create a research plan based on our conversation",
+                    status_callback=update_status
+                )
+                status_container.update(label="✅ Agent processing complete!", state="complete", expanded=False)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response.get("message", ""),
+                "agent": response.get("agent_used")
+            })
+            if response.get("plan"):
+                st.session_state.current_plan = response["plan"]
+            st.rerun()
+
+    with col2:
+        if st.button("🔍 Execute Research", use_container_width=True):
+            st.session_state.messages.append({
+                "role": "user",
+                "content": "Execute the pending research tasks"
+            })
+            with st.status("🤖 Orchestrating agents...", expanded=True) as status_container:
+                def update_status(msg):
+                    status_container.write(f"🔄 {msg}")
+                    status_container.update(label=f"🤖 {msg}")
+                response = st.session_state.orchestrator.process_message(
+                    "Execute the pending research tasks",
+                    status_callback=update_status
+                )
+                status_container.update(label="✅ Agent processing complete!", state="complete", expanded=False)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response.get("message", ""),
+                "agent": response.get("agent_used")
+            })
+            st.rerun()
+
+    with col3:
+        if st.button("⚠️ Validate Data", use_container_width=True):
+            st.session_state.messages.append({
+                "role": "user",
+                "content": "Validate the collected data for any issues"
+            })
+            with st.status("🤖 Orchestrating agents...", expanded=True) as status_container:
+                def update_status(msg):
+                    status_container.write(f"🔄 {msg}")
+                    status_container.update(label=f"🤖 {msg}")
+                response = st.session_state.orchestrator.process_message(
+                    "Validate the collected data for any issues",
+                    status_callback=update_status
+                )
+                status_container.update(label="✅ Agent processing complete!", state="complete", expanded=False)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response.get("message", ""),
+                "agent": response.get("agent_used")
+            })
+            st.rerun()
+
+    with col4:
+        if st.button("📝 Generate Report", use_container_width=True):
+            st.session_state.messages.append({
+                "role": "user",
+                "content": "Generate a final research report"
+            })
+            with st.status("🤖 Orchestrating agents...", expanded=True) as status_container:
+                def update_status(msg):
+                    status_container.write(f"🔄 {msg}")
+                    status_container.update(label=f"🤖 {msg}")
+                response = st.session_state.orchestrator.process_message(
+                    "Generate a final research report",
+                    status_callback=update_status
+                )
+                status_container.update(label="✅ Agent processing complete!", state="complete", expanded=False)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response.get("message", ""),
+                "agent": response.get("agent_used")
+            })
+            st.rerun()
 
 
 if __name__ == "__main__":

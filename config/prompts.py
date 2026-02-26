@@ -44,6 +44,10 @@ Focus on:
 2. Then exploring biological mechanisms (Reactome, STRING)
 3. Finally identifying active researchers if relevant (OpenAlex)
 
+CRITICAL INSTRUCTION FOR ENTITIES:
+Under the "entities" field in the JSON, DO NOT use conversational phrases, verbs, or long strings like "Identify strongly validated genes". 
+You MUST extract ONLY the short, broad, core keywords needed for a database search, e.g., "alzheimer", "pulmonary fibrosis", "ipf", "BRCA1".
+
 Return your plan as a valid JSON object."""
 
 SYNTHESIZER_SYSTEM_PROMPT = """You are a research synthesis assistant. Your task is to compile

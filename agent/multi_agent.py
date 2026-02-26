@@ -533,12 +533,14 @@ class MultiAgentOrchestrator:
             self.db = None
             logger.warning("Firestore not available, using in-memory state only")
 
-    def process_message(self, user_message: str) -> dict:
+    def process_message(self, user_message: str, status_callback=None) -> dict:
         """
         Process a user message and return agent response.
 
         This is the main entry point for user interactions.
         """
+        if status_callback: status_callback("Analyzing user intent and routing to the appropriate agent...")
+        
         # Add user message to memory
         self.memory.add_message("user", user_message)
 
@@ -549,6 +551,8 @@ class MultiAgentOrchestrator:
         next_agent = routing.get("next_agent", "CLARIFIER")
         instructions = routing.get("agent_instructions", "")
 
+        if status_callback: status_callback(f"Routing task to **{next_agent}** agent...")
+
         response = {
             "session_id": self.session_id,
             "intent": routing.get("intent"),
@@ -558,6 +562,7 @@ class MultiAgentOrchestrator:
 
         # Execute appropriate agent
         if next_agent == "PLANNER":
+            if status_callback: status_callback("Generating or modifying the research plan based on the request...")
             if self.memory.current_plan:
                 plan = self.planner.modify_plan(instructions, self.memory)
             else:
@@ -567,31 +572,39 @@ class MultiAgentOrchestrator:
             response["message"] = self._format_plan_message(plan)
 
         elif next_agent == "RESEARCHER":
+            if status_callback: status_callback("Executing database queries across connected sources (ClinGen, Reactome, etc.)...")
             results = self.researcher.execute_all_pending(self.memory)
+            if status_callback: status_callback(f"Completed {len(results)} queries. Synthesizing data...")
             response["results"] = results
             response["message"] = self._format_research_message(results)
 
         elif next_agent == "VALIDATOR":
+            if status_callback: status_callback("Validating aggregated evidence for conflicts and correctness...")
             validation = self.validator.validate(self.memory)
             response["validation"] = validation
             response["message"] = self._format_validation_message(validation)
             response["requires_input"] = validation.get("requires_human_review", False)
 
         elif next_agent == "SYNTHESIZER":
+            if status_callback: status_callback("Synthesizing findings into a structured report...")
             report = self.synthesizer.synthesize(self.memory)
             response["report"] = report
             response["message"] = report
 
         elif next_agent == "CLARIFIER":
+            if status_callback: status_callback("Intent unclear. Preparing a clarification prompt...")
             response["message"] = routing.get("user_prompt", "Could you please clarify?")
             response["requires_input"] = True
 
+        if status_callback: status_callback("Saving session and logging metrics...")
+        
         # Add assistant message to memory
         self.memory.add_message("assistant", response.get("message", ""))
 
         # Persist state
         self._save_state()
 
+        if status_callback: status_callback("Response ready.")
         return response
 
     def _format_plan_message(self, plan: dict) -> str:
