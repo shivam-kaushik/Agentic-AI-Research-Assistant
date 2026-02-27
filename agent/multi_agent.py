@@ -555,6 +555,8 @@ class ResearcherAgent(BaseAgent):
                     result["data"] = matches.to_dict("records")[:30]
                     result["count"] = len(matches)
                     result["success"] = True
+                    
+                    if status_callback: status_callback(f"✅ Retrieved {len(matches)} Q&A pairs from PubMedQA")
 
                     # Count answer types
                     if not matches.empty and "Answer" in matches.columns:
@@ -586,6 +588,8 @@ class ResearcherAgent(BaseAgent):
                     result["data"] = matches.to_dict("records")[:30]
                     result["count"] = len(matches)
                     result["success"] = True
+                    
+                    if status_callback: status_callback(f"✅ Retrieved {len(matches)} preprints from bioRxiv/medRxiv")
 
                     # Count by source
                     if not matches.empty and "source" in matches.columns:
@@ -615,6 +619,8 @@ class ResearcherAgent(BaseAgent):
                     result["count"] = len(matches)
                     result["success"] = True
                     result["total"] = len(matches)
+                    
+                    if status_callback: status_callback(f"✅ Retrieved {len(matches)} knowledge connections from ORKG")
 
             elif data_source == "openalex":
                 # Query OpenAlex for researchers
@@ -630,6 +636,9 @@ class ResearcherAgent(BaseAgent):
                     result["count"] = len(result["data"])
                     result["researchers"] = result["data"]
                     result["openalex_query"] = query
+                    
+                    if result["success"] and status_callback:
+                        status_callback(f"✅ Found {len(result['data'])} researchers in OpenAlex")
 
                     # Also query ORKG for knowledge connections
                     # Use gene_variants and topic_keywords from plan for better results
@@ -693,12 +702,14 @@ class ResearcherAgent(BaseAgent):
 
                         # Generate Knowledge Graph visualizations using RAW data (more comprehensive)
                         try:
+                            if status_callback: status_callback("📊 Generating knowledge graph visualizations...")
                             from tools.knowledge_graph_viz import create_knowledge_graph, create_gene_disease_graph
 
                             # Use raw data for visualization (more nodes = better graph)
                             viz_data = raw_orkg_data if raw_orkg_data else result["orkg_data"]
 
                             # Create ORKG Knowledge Graph
+                            if status_callback: status_callback("🔬 Creating ORKG semantic network graph...")
                             kg_result = create_knowledge_graph(
                                 orkg_data=viz_data,
                                 disease_name=primary_disease,
@@ -707,9 +718,12 @@ class ResearcherAgent(BaseAgent):
                                 session_id=memory.session_id,
                             )
                             result["knowledge_graph"] = kg_result
+                            if kg_result.get("success"):
+                                if status_callback: status_callback(f"✅ ORKG graph created: {kg_result.get('node_count', 0)} nodes, {kg_result.get('edge_count', 0)} edges")
 
                             # Create Gene-Disease Graph from ClinGen data
                             if "task_1" in memory.collected_data:
+                                if status_callback: status_callback("🧬 Creating gene-disease relationship graph...")
                                 clingen_records = memory.collected_data["task_1"].get("data", [])
                                 gd_result = create_gene_disease_graph(
                                     clingen_data=clingen_records,
@@ -718,6 +732,8 @@ class ResearcherAgent(BaseAgent):
                                     session_id=memory.session_id,
                                 )
                                 result["gene_disease_graph"] = gd_result
+                                if gd_result.get("success"):
+                                    if status_callback: status_callback(f"✅ Gene-Disease graph created: {gd_result.get('node_count', 0)} nodes")
 
                             logger.info(f"Knowledge graphs generated: KG={kg_result.get('success')}, GD={gd_result.get('success') if 'gd_result' in dir() else 'N/A'}")
 
