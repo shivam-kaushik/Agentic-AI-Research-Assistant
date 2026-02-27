@@ -41,26 +41,28 @@ class GCPConfig:
 
 @dataclass
 class BigQueryTables:
-    """BigQuery table references."""
+    """BigQuery table references (ClinGen only for hybrid approach)."""
 
-    # ClinGen tables
+    # ClinGen tables (also available via GCS)
     clingen_gene_disease: str = "coinvestigator.clingen_gene_disease"
     clingen_variant_pathogenicity: str = "coinvestigator.clingen_variant_pathogenicity"
 
-    # CIViC tables
-    civic_evidence: str = "coinvestigator.civic_evidence"
-    civic_variants: str = "coinvestigator.civic_variants"
 
-    # Reactome tables
-    reactome_pathways: str = "coinvestigator.reactome_pathways"
-    reactome_pathway_relations: str = "coinvestigator.reactome_pathway_relations"
-    reactome_uniprot_mapping: str = "coinvestigator.reactome_uniprot_mapping"
+@dataclass
+class GCSPaths:
+    """GCS paths for datasets (QueryQuest style)."""
 
-    # STRING tables
-    string_protein_links: str = "coinvestigator.string_protein_links"
-    string_protein_info: str = "coinvestigator.string_protein_info"
+    bucket: str = "benchspark-data-1771447466-datasets"
+
+    # Dataset prefixes
+    clingen_prefix: str = "clingen/"
+    pubmedqa_prefix: str = "pubmedqa/"
+    biorxiv_prefix: str = "biorxiv-medrxiv/"
+    orkg_prefix: str = "orkg/"
+    orkg_dump: str = "orkg/orkg-dump.nt"
 
 
 # Global instances
 config = GCPConfig.from_env()
 tables = BigQueryTables()
+gcs_paths = GCSPaths()

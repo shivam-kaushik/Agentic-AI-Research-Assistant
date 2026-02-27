@@ -2,10 +2,14 @@
 Synthesizer Node for Co-Investigator Agent
 
 Compiles all collected research findings into a structured markdown report.
+Enhanced with QueryQuest v9.0 features:
+- Export to markdown file automatically
+- Comprehensive research brief format
 """
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
@@ -18,16 +22,67 @@ from agent.state import AgentState, ResearchPlan
 
 logger = logging.getLogger(__name__)
 
+# Output directory for exported reports
+OUTPUT_DIR = Path("outputs")
+
+
+# Enhanced synthesizer prompt for QueryQuest-style reports
+QUERYQUEST_SYNTHESIZER_PROMPT = """You are a biomedical research analyst writing a comprehensive research brief.
+
+Write a well-structured markdown research report that includes:
+
+1. **Executive Summary** (3-4 sentences)
+   - Key findings at a glance
+   - Most important genes/pathways identified
+   - Research significance
+
+2. **Research Methodology**
+   - Datasets queried (ClinGen, PubMedQA, bioRxiv/medRxiv, ORKG, OpenAlex)
+   - Search terms used
+   - Filtering criteria
+
+3. **Gene-Disease Findings** (from ClinGen)
+   - Definitive associations (list genes)
+   - Strong associations
+   - Classification breakdown
+
+4. **Literature Insights** (from PubMedQA, bioRxiv)
+   - Key Q&A findings
+   - Recent preprint themes
+   - Emerging research directions
+
+5. **Key Researchers** (from OpenAlex)
+   - Top researchers by H-index
+   - Institutional affiliations
+   - Collaboration opportunities
+
+6. **Knowledge Graph Connections** (from ORKG)
+   - Relevant concepts and papers
+   - Cross-references
+
+7. **Recommendations**
+   - Suggested next steps
+   - Potential collaboration targets
+   - Research gaps identified
+
+8. **Data Sources & Citations**
+
+Be specific. Use actual data values. Cite sources."""
+
 
 def synthesizer_node(state: AgentState) -> dict:
     """
     Synthesizer node that generates the final research report.
 
+    Enhanced with QueryQuest v9.0 features:
+    - Comprehensive research brief format
+    - Automatic export to markdown file
+
     Args:
         state: Current agent state with all collected data
 
     Returns:
-        Updated state with final report
+        Updated state with final report and export path
     """
     logger.info("Synthesizer node generating report")
 
@@ -35,10 +90,10 @@ def synthesizer_node(state: AgentState) -> dict:
         # Initialize Vertex AI
         vertexai.init(project=config.project_id, location=config.location)
 
-        # Create model instance
+        # Create model instance with QueryQuest-style prompt
         model = GenerativeModel(
             config.synthesizer_model,
-            system_instruction=SYNTHESIZER_SYSTEM_PROMPT,
+            system_instruction=QUERYQUEST_SYNTHESIZER_PROMPT,
         )
 
         # Configure generation
@@ -47,31 +102,44 @@ def synthesizer_node(state: AgentState) -> dict:
             max_output_tokens=4096,
         )
 
-        # Prepare inputs
-        plan_dict = state.get("plan", {})
-        plan = ResearchPlan.from_dict(plan_dict) if plan_dict else None
+        # Format the collected data for the prompt
+        collected_data = _format_queryquest_data(state)
 
-        execution_plan = _format_execution_plan(plan) if plan else "No plan available"
-        collected_data = _format_collected_data(state.get("results", {}))
-        steps_completed = _format_steps_completed(plan) if plan else "No steps recorded"
+        # Build the prompt
+        prompt = f"""Generate a comprehensive research brief for this query:
 
-        # Generate report
-        prompt = SYNTHESIZER_USER_PROMPT.format(
-            research_query=state["user_query"],
-            execution_plan=execution_plan,
-            collected_data=collected_data,
-            steps_completed=steps_completed,
-            human_feedback=state.get("human_feedback", "None provided"),
-        )
+## Research Query
+{state['user_query']}
+
+## Disease Focus
+{', '.join(state.get('disease_variants', [])) or 'Not specified'}
+
+## Genes Identified
+{', '.join(state.get('gene_variants', [])) or 'None specified'}
+
+## Topic Keywords
+{', '.join(state.get('topic_keywords', [])) or 'None specified'}
+
+## Collected Data
+
+{collected_data}
+
+## Human Feedback
+{state.get('human_feedback', 'None provided')}
+
+Generate the research brief now:"""
 
         response = model.generate_content(prompt, generation_config=generation_config)
-
         final_report = response.text
 
-        logger.info("Report generated successfully")
+        # Export to markdown file
+        export_path = _export_to_file(final_report, state["session_id"])
+
+        logger.info(f"Report generated and exported to {export_path}")
 
         return {
             "final_report": final_report,
+            "export_path": export_path,
             "current_node": "synthesizer",
             "execution_history": state["execution_history"] + ["synthesizer"],
             "updated_at": datetime.now().isoformat(),
@@ -81,13 +149,123 @@ def synthesizer_node(state: AgentState) -> dict:
         logger.error(f"Synthesizer error: {e}")
         # Generate fallback report
         fallback_report = _generate_fallback_report(state)
+        export_path = _export_to_file(fallback_report, state["session_id"])
+
         return {
             "final_report": fallback_report,
+            "export_path": export_path,
             "error": f"Report generation partially failed: {str(e)}",
             "current_node": "synthesizer",
             "execution_history": state["execution_history"] + ["synthesizer"],
             "updated_at": datetime.now().isoformat(),
         }
+
+
+def _export_to_file(report: str, session_id: str) -> str:
+    """Export report to markdown file."""
+    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"research_brief_{session_id}_{timestamp}.md"
+    filepath = OUTPUT_DIR / filename
+
+    filepath.write_text(report, encoding="utf-8")
+
+    logger.info(f"Report exported to {filepath}")
+    return str(filepath)
+
+
+def _format_queryquest_data(state: AgentState) -> str:
+    """Format collected data in QueryQuest style."""
+    sections = []
+
+    # ClinGen results
+    clingen = state.get("clingen_results")
+    if clingen and isinstance(clingen, dict):
+        section = ["### ClinGen Gene-Disease Associations"]
+        total = clingen.get("total", 0)
+        section.append(f"Total: {total} gene-disease links")
+
+        definitive = clingen.get("definitive", [])
+        if definitive:
+            genes = [r.get("Gene_Symbol", "") for r in definitive[:10]]
+            section.append(f"- Definitive ({len(definitive)}): {', '.join(genes)}")
+
+        strong = clingen.get("strong", [])
+        if strong:
+            genes = [r.get("Gene_Symbol", "") for r in strong[:10]]
+            section.append(f"- Strong ({len(strong)}): {', '.join(genes)}")
+
+        sections.append("\n".join(section))
+
+    # PubMedQA results
+    pubmedqa = state.get("pubmedqa_results")
+    if pubmedqa and isinstance(pubmedqa, dict):
+        section = ["### PubMedQA Q&A Pairs"]
+        total = pubmedqa.get("total", 0)
+        yes_count = pubmedqa.get("yes_count", 0)
+        no_count = pubmedqa.get("no_count", 0)
+        section.append(f"Total: {total} Q&A pairs (YES: {yes_count}, NO: {no_count})")
+
+        results = pubmedqa.get("results", [])
+        for qa in results[:5]:
+            q = qa.get("Question", "")[:100]
+            a = qa.get("Answer", "")
+            section.append(f"- Q: {q}... A: {a}")
+
+        sections.append("\n".join(section))
+
+    # bioRxiv results
+    biorxiv = state.get("biorxiv_results")
+    if biorxiv and isinstance(biorxiv, dict):
+        section = ["### bioRxiv/medRxiv Preprints"]
+        total = biorxiv.get("total", 0)
+        bx = biorxiv.get("biorxiv_count", 0)
+        mx = biorxiv.get("medrxiv_count", 0)
+        section.append(f"Total: {total} preprints (bioRxiv: {bx}, medRxiv: {mx})")
+
+        results = biorxiv.get("results", [])
+        for paper in results[:5]:
+            title = paper.get("Title", "")[:80]
+            authors = paper.get("Authors", "")[:50]
+            date = paper.get("Date", "")
+            section.append(f"- \"{title}\" ({authors}, {date})")
+
+        sections.append("\n".join(section))
+
+    # ORKG results
+    orkg = state.get("orkg_results")
+    if orkg and isinstance(orkg, dict):
+        section = ["### ORKG Knowledge Graph"]
+        total = orkg.get("total", 0)
+        section.append(f"Total: {total} knowledge entries")
+
+        results = orkg.get("results", [])
+        for entry in results[:5]:
+            obj = entry.get("object", "")[:100]
+            section.append(f"- {obj}")
+
+        sections.append("\n".join(section))
+
+    # Researcher results
+    researchers = state.get("researcher_results")
+    if researchers:
+        if isinstance(researchers, dict):
+            researchers = researchers.get("researchers", [])
+
+        section = ["### OpenAlex Researchers"]
+        section.append(f"Total: {len(researchers)} researchers identified")
+
+        for r in researchers[:5]:
+            name = r.get("name", "Unknown")
+            h_index = r.get("h_index", "N/A")
+            citations = r.get("cited_by_count", 0)
+            inst = r.get("affiliation", "N/A")
+            section.append(f"- {name} (H-index: {h_index}, Citations: {citations:,}, {inst})")
+
+        sections.append("\n".join(section))
+
+    return "\n\n".join(sections) if sections else "No data collected"
 
 
 def _format_execution_plan(plan: ResearchPlan) -> str:
@@ -179,71 +357,91 @@ def _format_steps_completed(plan: ResearchPlan) -> str:
 
 def _generate_fallback_report(state: AgentState) -> str:
     """Generate a basic report when LLM synthesis fails."""
-    results = state.get("results", {})
-    plan_dict = state.get("plan", {})
+    disease_name = state.get("disease_variants", ["Disease"])[0] if state.get("disease_variants") else "Disease"
 
-    report = f"""# Research Report
+    report = f"""# Research Brief: {disease_name}
 
 ## Research Question
 {state['user_query']}
 
-## Summary
-This report was generated using automated data retrieval from multiple biomedical databases.
+## Executive Summary
+This research brief was generated using automated data retrieval from multiple biomedical databases including ClinGen, PubMedQA, bioRxiv/medRxiv, ORKG, and OpenAlex.
 
-## Methodology
+## Research Methodology
+**Disease Focus:** {', '.join(state.get('disease_variants', ['Not specified']))}
+**Genes Identified:** {', '.join(state.get('gene_variants', [])) or 'None specified'}
+**Topic Keywords:** {', '.join(state.get('topic_keywords', [])) or 'None specified'}
+
+## Gene-Disease Findings
 """
 
-    if plan_dict:
-        plan = ResearchPlan.from_dict(plan_dict)
-        report += f"Research goal: {plan.research_goal}\n\n"
-        report += "Tasks executed:\n"
-        for task in plan.sub_tasks:
-            report += f"- {task.description} (Status: {task.status.value})\n"
+    # ClinGen results
+    clingen = state.get("clingen_results")
+    if clingen and isinstance(clingen, dict):
+        total = clingen.get("total", 0)
+        report += f"Found {total} gene-disease associations in ClinGen.\n\n"
 
-    report += "\n## Findings\n\n"
+        definitive = clingen.get("definitive", [])
+        if definitive:
+            genes = [r.get("Gene_Symbol", "") for r in definitive[:10]]
+            report += f"**Definitive genes ({len(definitive)}):** {', '.join(genes)}\n\n"
 
-    for task_id, result in results.items():
-        if not result:
-            continue
+        strong = clingen.get("strong", [])
+        if strong:
+            genes = [r.get("Gene_Symbol", "") for r in strong[:10]]
+            report += f"**Strong genes ({len(strong)}):** {', '.join(genes)}\n\n"
+    else:
+        report += "No ClinGen results available.\n\n"
 
-        source = result.get("source", "unknown")
-        count = result.get("count", result.get("total_count", 0))
-        success = result.get("success", False)
+    report += "## Literature Insights\n"
 
-        report += f"### {source.replace('_', ' ').title()}\n"
+    # PubMedQA results
+    pubmedqa = state.get("pubmedqa_results")
+    if pubmedqa and isinstance(pubmedqa, dict):
+        total = pubmedqa.get("total", 0)
+        report += f"Found {total} relevant Q&A pairs from PubMedQA.\n\n"
+    else:
+        report += "No PubMedQA results available.\n\n"
 
-        if success:
-            report += f"Found {count} records.\n\n"
-            data = result.get("data", [])
-            if data:
-                for item in data[:5]:
-                    if "gene" in item or "gene_symbol" in item:
-                        gene = item.get("gene") or item.get("gene_symbol")
-                        disease = item.get("disease", "N/A")
-                        report += f"- **{gene}**: {disease}\n"
-                    elif "title" in item:
-                        report += f"- {item.get('title', 'N/A')}\n"
-                    elif "display_name" in item:
-                        report += f"- {item.get('display_name', 'N/A')}\n"
-        else:
-            report += f"Error: {result.get('error', 'Unknown error')}\n"
+    # bioRxiv results
+    biorxiv = state.get("biorxiv_results")
+    if biorxiv and isinstance(biorxiv, dict):
+        total = biorxiv.get("total", 0)
+        report += f"Found {total} relevant preprints from bioRxiv/medRxiv.\n\n"
+    else:
+        report += "No bioRxiv results available.\n\n"
 
-        report += "\n"
+    report += "## Key Researchers\n"
+
+    # Researcher results
+    researchers = state.get("researcher_results")
+    if researchers:
+        if isinstance(researchers, dict):
+            researchers = researchers.get("researchers", [])
+        report += f"Identified {len(researchers)} researchers in this field.\n\n"
+        for r in researchers[:5]:
+            name = r.get("name", "Unknown")
+            h_index = r.get("h_index", "N/A")
+            report += f"- **{name}** (H-index: {h_index})\n"
+    else:
+        report += "No researcher data available.\n"
 
     if state.get("human_feedback"):
         report += f"\n## Human Feedback\n{state['human_feedback']}\n"
 
     report += f"""
+---
+
 ## Data Sources
 - ClinGen (Gene-Disease Validity)
-- CIViC (Clinical Evidence)
-- Reactome (Biological Pathways)
-- STRING (Protein Interactions)
+- PubMedQA (Biomedical Q&A)
+- bioRxiv/medRxiv (Preprints)
+- ORKG (Open Research Knowledge Graph)
 - OpenAlex (Researcher Information)
-- PubMed (Research Abstracts)
 
 ---
 *Report generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*
+*Session ID: {state.get('session_id', 'N/A')}*
 """
 
     return report

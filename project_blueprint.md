@@ -41,13 +41,17 @@ Our solution shifts from linear execution to a cyclical execution model with "Dy
 - **Frontend (Streamlit on Cloud Run):** 
   - Provides a natural language prompt bar, a live execution graph for visibility, an interactive window for HITL prompts, and a final Markdown ledger with explicit citations.
 
-**LangGraph Node Workflow:**
-1. **The Planner:** Translates the user prompt into a structured JSON execution plan of sub-tasks.
-2. **The Internal_Retriever:** Executes parameterized BigQuery SQL against datasets (e.g., OpenTargets) and stores results in the state.
-3. **The Conflict_Detector:** Validates BigQuery data via API sets (e.g., PubTator) for recent retractions or toxicity tags.
-4. **The Human_in_the_Loop (HITL):** Pauses execution, pushes state to Firestore, and waits for human feedback via the Streamlit UI.
-5. **The External_API_Caller:** Retrieves dynamic data from external APIs (e.g., OpenAlex for researcher info) on remaining valid targets.
-6. **The Synthesizer:** Compiles the aggregated internal and external evidence into a final Markdown report.
+**LangGraph/Agentic Node Workflow:**
+1. **The Planner:** Translates the user prompt into a structured JSON execution plan composed of 3 fixed subtasks:
+    - Retrieve validated Gene disease association related to the topic.
+    - Scan recent literature and pre-prints focusing on the topic.
+    - Identify active researchers and knowledge connections.
+2. **The Data Executors:** Specialized agents for each dataset (e.g., ClinGen, ORKG) that execute queries and retrieve data.
+3. **The Conflict_Detector:** Validates data across sources for recent retractions or toxicity tags.
+4. **Smart Adaptive Checkpoint (HITL):** Pauses execution, generating context-aware options based on execution results, and updates the plan based on user choice.
+5. **The Synthesizer:** Compiles the aggregated internal and external evidence into a final Markdown report.
+6. **The Visualizer:** Generates charts and provides concise, scientific insights for each visualization.
+7. **Conversational Follow-up Agent:** Engages with the user in a Q&A session after the brief is generated, allowing for clarifying questions.
 
 **Execution Roadmap (24-Hour Sprint):**
 - **Phase 1 (Hours 1-3):** Initialize Vertex AI Workbench, create GCP Service Account, config Cloud Run CI/CD.
@@ -60,21 +64,45 @@ Our solution shifts from linear execution to a cyclical execution model with "Dy
 
 ## 3. Datasets & APIs We Will Use
 
+**GCS Bucket:** `gs://benchspark-data-1771447466-datasets/`
+
 To maximize our "Data Mastery" score, datasets are structured into three intelligence layers:
 
-### Layer A: The Genetic & Clinical Foundation (The "Ground Truth")
-Goal: Establish what is biologically and clinically true before looking at literature.
-- **ClinGen (The Anchor):** When a user asks about a disease (e.g., IPF), the agent first hits ClinGen to find definitively linked genes and pathogenic variants. It ignores speculative biology.
-- **GTEx v8 (The Safety Check):** The agent verifies where these genes are expressed in the human body to anticipate off-target toxicity.
-- **CIViC (The Oncology Specialized Check):** If the query is cancer-related, the agent uses CIViC to check the clinical evidence level of specific variants.
+### Layer A: The Genetic Foundation (Ground Truth)
+Goal: Establish what is biologically validated before looking at literature.
 
-### Layer B: The Knowledge Graph & Mechanism Engine (The "Multi-Hop" Layer)
-Goal: Map how these genes interact and find the exact research papers discussing these connections.
-- **Pathway Commons & Reactome (The Biological Graph):** The agent takes the genes from Layer A and traverses the biological network. *Example: "ClinGen gave me Gene X. Pathway Commons shows Gene X physically interacts with Protein Y in the TGF-beta pathway."*
-- **ORKG - Open Research Knowledge Graph (The Concept Graph):** This is your massive differentiator. The agent queries the N-Triples graph to find how scientific concepts map to papers. *Example: "Find all papers where the Research Problem is 'IPF' and the Method involves 'TGF-beta inhibition'."*
-- **PubTator 3.0 (The entity-to-PMID Bridge):** The agent cross-references the targets with PubTator to extract the exact PubMed IDs (PMIDs) of the most heavily annotated literature.
+- **ClinGen** (GCS: `clingen/*.csv`)
+  - Gene-disease validity with classifications (Definitive, Strong, Moderate, Limited, Disputed)
+  - Schema: Gene_Symbol, Disease_Label, MOI, Classification, Disease_ID_MONDO
+  - First source queried to establish definitive genetic associations
+  - Approx. ~10,000 gene-disease entries
 
-### Layer C: The External Validation APIs (The "Live Researcher" Check)
-Goal: Fulfill the MVP API requirement by finding the humans behind the science.
-- **OpenAlex API (Researcher Velocity):** The agent takes the PMIDs and DOIs discovered via ORKG and PubTator (Layer B) and pings OpenAlex. It calculates which authors are currently active (publishing post-2023) and gathers their institutional affiliations.
-- **PubMed (Entrez API):** Used to pull the absolute latest abstracts that might not yet be indexed in the static BigQuery datasets.
+### Layer B: Research Literature (Active Research)
+Goal: Find the latest research and preprints discussing these genes and diseases.
+
+- **PubMedQA** (GCS: `pubmedqa/*.json`)
+  - Labelled Q&A from PubMed abstracts (YES/NO/MAYBE answers)
+  - Schema: ID, Question, Answer, Context, Type
+  - Enables question-answering capability for biomedical queries
+  - Approx. ~1,000 searchable Q&A pairs
+
+- **bioRxiv/medRxiv** (GCS: `biorxiv-medrxiv/*.json`)
+  - Recent preprints with Title, Authors, Date, Abstract, DOI
+  - Reveals cutting-edge research not yet peer-reviewed
+  - Trend analysis over time
+  - Approx. ~50,000 preprints
+
+### Layer C: Knowledge Graph & Researchers
+Goal: Map scientific concepts and find the humans behind the science.
+
+- **ORKG** (GCS: `orkg/orkg-dump.nt`)
+  - Open Research Knowledge Graph RDF triples (N-Triples format)
+  - Searchable label text (rdfs:label predicates)
+  - Maps scientific concepts to papers
+  - Approx. ~50,000 searchable label triples
+
+- **OpenAlex** (Live API)
+  - Researcher identification by citations and H-index
+  - Institutional affiliations and publication records
+  - Real-time queries via API
+  - Used for finding active researchers in a field
