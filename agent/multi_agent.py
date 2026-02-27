@@ -136,7 +136,7 @@ Tasks: {[t.get('task_id') for t in self.current_plan.get('sub_tasks', [])]}
 class BaseAgent:
     """Base class for all agents."""
 
-    def __init__(self, name: str, model_name: str = "gemini-2.5-pro"):
+    def __init__(self, name: str, model_name: str = "gemini-2.5-flash"):
         self.name = name
         self.model = GenerativeModel(model_name)
 
@@ -478,7 +478,7 @@ class ResearcherAgent(BaseAgent):
         self.biorxiv_loader = BioRxivLoader()
         self.orkg_loader = ORKGLoader()
 
-    def execute_task(self, task: dict, memory: ConversationMemory) -> dict:
+    def execute_task(self, task: dict, memory: ConversationMemory, status_callback=None) -> dict:
         """Execute a single research task against QueryQuest datasets."""
         task_id = task.get("task_id", "unknown")
         data_source = task.get("data_source", "")
@@ -488,6 +488,7 @@ class ResearcherAgent(BaseAgent):
         primary_disease = memory.current_plan.get("disease_variants", [""])[0] if memory.current_plan and memory.current_plan.get("disease_variants") else ""
 
         logger.info(f"Researcher executing task: {task_id} on {data_source}")
+        if status_callback: status_callback(f"📋 Starting **{task_id}**: {task.get('description', 'Research task')}")
 
         result = {
             "task_id": task_id,
@@ -500,20 +501,24 @@ class ResearcherAgent(BaseAgent):
         try:
             if data_source == "clingen":
                 # Query ClinGen via GCS loader
+                if status_callback: status_callback(f"🧬 Querying **ClinGen** database for gene-disease associations...")
                 disease = query_params.get("disease", primary_disease)
                 gene = query_params.get("gene", "")
                 terms = [disease] if disease else []
                 if gene:
                     terms.append(gene)
 
+                if status_callback: status_callback(f"🔍 Loading ClinGen records for '{disease}'...")
                 df = self.clingen_loader.load_all()
                 if not df.empty and terms:
                     from tools.search_utils import smart_search, gemini_filter
+                    if status_callback: status_callback(f"🔎 Searching {len(df)} ClinGen records for matching genes...")
                     matches = smart_search(df, "Disease_Label", terms)
                     if matches.empty and gene:
                         matches = smart_search(df, "Gene_Symbol", [gene])
                     
                     if not matches.empty and primary_disease:
+                        if status_callback: status_callback(f"🤖 Using AI to filter {len(matches)} results for relevance...")
                         matches = gemini_filter(matches, "Disease_Label", primary_disease, max_results=30)
 
                     result["data"] = matches.to_dict("records")[:50]
@@ -528,6 +533,7 @@ class ResearcherAgent(BaseAgent):
 
             elif data_source == "pubmedqa":
                 # Query PubMedQA via GCS loader
+                if status_callback: status_callback(f"📚 Querying **PubMedQA** database for literature Q&A pairs...")
                 terms = query_params.get("terms", [])
                 if not terms:
                     terms = [query_params.get("disease", ""), query_params.get("query", "")]
@@ -535,6 +541,7 @@ class ResearcherAgent(BaseAgent):
                     terms.append(primary_disease)
                 terms = [t for t in terms if t]
 
+                if status_callback: status_callback(f"📥 Loading PubMedQA dataset...")
                 df = self.pubmedqa_loader.load_all()
                 if not df.empty and terms:
                     from tools.search_utils import smart_search, gemini_filter
@@ -557,6 +564,7 @@ class ResearcherAgent(BaseAgent):
 
             elif data_source == "biorxiv":
                 # Query bioRxiv/medRxiv via GCS loader
+                if status_callback: status_callback(f"📄 Querying **bioRxiv/medRxiv** preprint servers...")
                 terms = query_params.get("terms", [])
                 if not terms:
                     terms = [query_params.get("disease", ""), query_params.get("query", "")]
@@ -564,6 +572,7 @@ class ResearcherAgent(BaseAgent):
                     terms.append(primary_disease)
                 terms = [t for t in terms if t]
 
+                if status_callback: status_callback(f"📥 Loading preprint database ({terms[0] if terms else 'all'})...")
                 df = self.biorxiv_loader.load_all()
                 if not df.empty and terms:
                     from tools.search_utils import smart_search, gemini_filter
@@ -586,6 +595,7 @@ class ResearcherAgent(BaseAgent):
 
             elif data_source == "orkg":
                 # Query ORKG via GCS loader
+                if status_callback: status_callback(f"🔬 Querying **ORKG** (Open Research Knowledge Graph)...")
                 terms = query_params.get("terms", [])
                 if not terms:
                     terms = [query_params.get("disease", ""), query_params.get("query", "")]
@@ -594,6 +604,7 @@ class ResearcherAgent(BaseAgent):
                 terms = [t for t in terms if t]
 
                 if terms:
+                    if status_callback: status_callback(f"🔍 Searching knowledge graph for scientific concepts...")
                     matches = self.orkg_loader.multi_search(
                         disease_variants=[primary_disease] if primary_disease else terms,
                         topic_keywords=terms,
@@ -607,10 +618,12 @@ class ResearcherAgent(BaseAgent):
 
             elif data_source == "openalex":
                 # Query OpenAlex for researchers
+                if status_callback: status_callback(f"👤 Querying **OpenAlex** for active researchers...")
                 from tools.search_openalex import search_researchers
                 query = query_params.get("query", primary_disease)
 
                 if query:
+                    if status_callback: status_callback(f"🔎 Searching for researchers publishing on '{query}'...")
                     query_result = search_researchers(query=query)
                     result["success"] = query_result.get("success", False)
                     result["data"] = query_result.get("data", [])
@@ -729,7 +742,7 @@ class ResearcherAgent(BaseAgent):
 
         return result
 
-    def execute_next_task(self, memory: ConversationMemory) -> dict | None:
+    def execute_next_task(self, memory: ConversationMemory, status_callback=None) -> dict | None:
         """Execute the next pending task (step-by-step execution)."""
         if not memory.current_plan:
             return {"error": "No plan to execute"}
@@ -743,7 +756,7 @@ class ResearcherAgent(BaseAgent):
                 # Check dependencies
                 depends_on = task.get("depends_on", [])
                 if all(dep in memory.completed_tasks for dep in depends_on):
-                    result = self.execute_task(task, memory)
+                    result = self.execute_task(task, memory, status_callback)
                     memory.last_step_result = result
                     memory.current_step_index = memory.completed_tasks.index(task_id) if task_id in memory.completed_tasks else len(memory.completed_tasks) - 1
                     return result
@@ -1302,9 +1315,9 @@ class MultiAgentOrchestrator:
             # Reset confirmation flag when continuing
             self.memory.awaiting_step_confirmation = False
 
-            if status_callback: status_callback("Executing next research step...")
+            if status_callback: status_callback("🔍 **Researcher agent** executing research task...")
 
-            result = self.researcher.execute_next_task(self.memory)
+            result = self.researcher.execute_next_task(self.memory, status_callback)
 
             if result is None:
                 # All tasks complete
@@ -1917,9 +1930,13 @@ class MultiAgentOrchestrator:
             kg_info = result.get("knowledge_graph", {})
             if kg_info.get("success"):
                 import os
-                kg_path = os.path.abspath(kg_info.get("graph_path")).replace("\\", "/")
+                kg_path = kg_info.get("graph_path")
+                # Use relative path from workspace root
+                if os.path.isabs(kg_path):
+                    # Get just the filename with outputs prefix
+                    kg_path = os.path.join("outputs", os.path.basename(kg_path))
                 lines.append("✅ **ORKG Semantic Network Graph Generated:**")
-                lines.append(f"![ORKG Semantic Network Graph](file:///{kg_path})")
+                lines.append(f"![ORKG Semantic Network Graph]({kg_path})")
                 lines.append(f"   📍 Nodes: {kg_info.get('node_count', 0)} | Edges: {kg_info.get('edge_count', 0)}")
                 
                 concepts = kg_info.get('concept_nodes', [])
@@ -1945,9 +1962,13 @@ class MultiAgentOrchestrator:
             gd_info = result.get("gene_disease_graph", {})
             if gd_info.get("success"):
                 import os
-                gd_path = os.path.abspath(gd_info.get("graph_path")).replace("\\", "/")
+                gd_path = gd_info.get("graph_path")
+                # Use relative path from workspace root
+                if os.path.isabs(gd_path):
+                    # Get just the filename with outputs prefix
+                    gd_path = os.path.join("outputs", os.path.basename(gd_path))
                 lines.append("✅ **Gene-Disease Relationship Graph Generated:**")
-                lines.append(f"![Gene-Disease Relationship Graph](file:///{gd_path})")
+                lines.append(f"![Gene-Disease Relationship Graph]({gd_path})")
                 lines.append(f"   📍 Nodes: {gd_info.get('node_count', 0)} | Edges: {gd_info.get('edge_count', 0)}")
                 
                 # Generate dynamic analysis

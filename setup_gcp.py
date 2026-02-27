@@ -308,7 +308,7 @@ def test_vertex_ai():
         from vertexai.generative_models import GenerativeModel
 
         vertexai.init(project=PROJECT_ID, location="us-central1")
-        model = GenerativeModel("gemini-2.5-pro")
+        model = GenerativeModel("gemini-2.5-flash")
 
         response = model.generate_content("Say 'GCP setup complete!' in exactly those words.")
         print(f"✅ Vertex AI connected")

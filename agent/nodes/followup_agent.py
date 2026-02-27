@@ -45,7 +45,7 @@ and suggest how to find that information."""
 
     EXIT_COMMANDS = {"exit", "done", "quit", "stop", "bye", "end", "finish"}
 
-    def __init__(self, state: AgentState, model_name: str = "gemini-2.5-pro"):
+    def __init__(self, state: AgentState, model_name: str = "gemini-2.5-flash"):
         """
         Initialize the follow-up agent with research state.
 

@@ -23,8 +23,8 @@ class GCPConfig:
     firestore_collection_hitl: str = "hitl_checkpoints"
 
     # Vertex AI Models
-    planner_model: str = "gemini-2.5-pro"
-    synthesizer_model: str = "gemini-2.5-pro"
+    planner_model: str = "gemini-2.5-flash"
+    synthesizer_model: str = "gemini-2.5-flash"
 
     # GCS Bucket for source data
     data_bucket: str = "gs://benchspark-data-1771447466-datasets"

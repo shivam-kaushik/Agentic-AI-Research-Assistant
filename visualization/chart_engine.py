@@ -49,7 +49,7 @@ PALETTE = [
 class ChartEngine:
     """Generate charts with Gemini-powered scientific explanations."""
 
-    def __init__(self, model_name: str = "gemini-2.5-pro"):
+    def __init__(self, model_name: str = "gemini-2.5-flash"):
         vertexai.init(project=config.project_id, location=config.location)
         self.model = GenerativeModel(model_name)
 

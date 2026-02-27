@@ -74,7 +74,7 @@ def gemini_filter(
     column: str,
     topic: str,
     max_results: int = 10,
-    model_name: str = "gemini-2.5-pro",
+    model_name: str = "gemini-2.5-flash",
 ) -> pd.DataFrame:
     """
     Use Gemini to filter search results for relevance.

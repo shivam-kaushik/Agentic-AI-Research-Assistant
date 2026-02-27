@@ -40,7 +40,7 @@ class ReActExecutor:
     4. DECIDE: Determine if step is complete or needs refinement
     """
 
-    def __init__(self, model_name: str = "gemini-2.5-pro"):
+    def __init__(self, model_name: str = "gemini-2.5-flash"):
         vertexai.init(project=config.project_id, location=config.location)
         self.model = GenerativeModel(model_name)
 

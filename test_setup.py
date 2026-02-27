@@ -129,7 +129,7 @@ def check_vertex_ai():
         from config.gcp_config import config
 
         vertexai.init(project=config.project_id, location=config.location)
-        model = GenerativeModel("gemini-2.5-pro")
+        model = GenerativeModel("gemini-2.5-flash")
 
         # Simple test
         response = model.generate_content("Say 'Hello, Co-Investigator!' in exactly those words.")
