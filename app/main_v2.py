@@ -323,6 +323,15 @@ def main():
         
         st.caption(f"Session: `{st.session_state.orchestrator.session_id[:12]}...`")
         
+        # Execution pause indicator
+        if memory.execution_paused:
+            st.markdown("---")
+            st.warning("⏸️ **Execution Paused**")
+            st.caption("Question mode active. Type 'continue' or 'proceed' to resume.")
+            if st.button("▶️ Resume Execution", use_container_width=True):
+                memory.resume_execution()
+                st.rerun()
+        
         st.markdown("---")
         
         # Real-time task tracking

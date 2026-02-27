@@ -19,6 +19,7 @@ from vertexai.generative_models import GenerativeModel, GenerationConfig, Conten
 from google.cloud import firestore
 
 from config.gcp_config import config
+from config.vector_store import VectorStoreManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,10 @@ class ConversationMemory:
     current_step_index: int = 0  # Which step we're on (0-indexed)
     awaiting_step_confirmation: bool = False  # Waiting for user to confirm next step
     last_step_result: dict = None  # Result from the last executed step
+    # Cross-questioning support
+    execution_paused: bool = False  # Set to True when user asks a question mid-execution
+    execution_context: dict = field(default_factory=dict)  # Stores state before pausing
+    question_mode: bool = False  # Currently answering a user question
 
     def add_message(self, role: str, content: str):
         """Add a message to history."""
@@ -48,6 +53,29 @@ class ConversationMemory:
             "content": content,
             "timestamp": datetime.now().isoformat()
         })
+    
+    def pause_execution(self):
+        """Pause current execution to handle a user question."""
+        self.execution_paused = True
+        self.question_mode = True
+        self.execution_context = {
+            "awaiting_step_confirmation": self.awaiting_step_confirmation,
+            "current_step_index": self.current_step_index,
+            "pending_tasks": self.pending_tasks.copy(),
+            "completed_tasks": self.completed_tasks.copy()
+        }
+        logger.info(f"Execution paused at step {self.current_step_index}")
+    
+    def resume_execution(self):
+        """Resume execution after answering user question."""
+        if self.execution_paused and self.execution_context:
+            self.execution_paused = False
+            self.question_mode = False
+            # Restore any critical state if needed
+            logger.info(f"Execution resumed from step {self.current_step_index}")
+            self.execution_context = {}
+        else:
+            self.question_mode = False
 
     def get_context_summary(self) -> str:
         """Get a summary of current context for agents."""
@@ -227,9 +255,42 @@ Based on the user message and context, respond with a JSON object:
     def route(self, user_message: str, memory: ConversationMemory) -> dict:
         """Determine which agent should handle the request."""
 
-        # DETERMINISTIC PRE-CHECK: Execution commands ALWAYS go to RESEARCHER
-        # This bypasses LLM for clear action keywords to prevent misrouting
+        # DETERMINISTIC PRE-CHECK 1: Detect cross-questioning during execution
+        # If execution is in progress and user asks a question, pause and route to CLARIFIER
         msg_lower = user_message.lower().strip()
+        
+        question_indicators = [
+            "what", "why", "how", "when", "who", "where", "which", "explain", 
+            "tell me", "can you", "could you", "show me", "describe", "clarify",
+            "what is", "what are", "what does", "what's", "how does", "how do"
+        ]
+        
+        is_question = any(msg_lower.startswith(indicator) or f" {indicator} " in msg_lower 
+                         for indicator in question_indicators)
+        
+        # Check if execution is in progress (has plan and pending tasks)
+        has_active_execution = (
+            memory.current_plan is not None and 
+            len(memory.pending_tasks) > 0 and 
+            not memory.execution_paused
+        )
+        
+        # If user asks a question during execution, pause and route to CLARIFIER
+        if is_question and has_active_execution and not memory.awaiting_step_confirmation:
+            memory.pause_execution()
+            return {
+                "intent": "Answer user question during execution",
+                "is_followup": True,
+                "is_question": True,
+                "next_agent": "CLARIFIER",
+                "agent_instructions": f"Answer this question using available context: {user_message}",
+                "preserve_state": True,
+                "requires_user_input": False,
+                "user_prompt": None
+            }
+
+        # DETERMINISTIC PRE-CHECK 2: Execution commands ALWAYS go to RESEARCHER
+        # This bypasses LLM for clear action keywords to prevent misrouting
         execution_keywords = [
             "yes", "proceed", "continue", "execute", "run", "start", "go ahead",
             "do it", "next", "ok", "sure", "go", "yeah", "yep", "y",
@@ -251,6 +312,9 @@ Based on the user message and context, respond with a JSON object:
         step_pattern = re.search(r'(proceed|run|execute|go|continue|start)\s*(with\s*)?(to\s*)?(step\s*\d+|next|the\s*plan)', msg_lower)
 
         if is_execution_command or step_pattern:
+            # Resume execution if it was paused
+            if memory.execution_paused:
+                memory.resume_execution()
             # Deterministically route to RESEARCHER
             return {
                 "intent": "Execute research step",
@@ -478,7 +542,7 @@ class ResearcherAgent(BaseAgent):
         self.biorxiv_loader = BioRxivLoader()
         self.orkg_loader = ORKGLoader()
 
-    def execute_task(self, task: dict, memory: ConversationMemory, status_callback=None) -> dict:
+    def execute_task(self, task: dict, memory: ConversationMemory, status_callback=None, vector_store=None) -> dict:
         """Execute a single research task against QueryQuest datasets."""
         task_id = task.get("task_id", "unknown")
         data_source = task.get("data_source", "")
@@ -751,6 +815,29 @@ class ResearcherAgent(BaseAgent):
             if task_id in memory.pending_tasks:
                 memory.pending_tasks.remove(task_id)
             memory.completed_tasks.append(task_id)
+            
+            # Store research finding in vector store for context retrieval
+            if vector_store and result.get("success"):
+                try:
+                    # Create a summary of the finding for vector storage
+                    data_count = result.get("count", 0)
+                    summary = f"Task {task_id}: Retrieved {data_count} records from {data_source}"
+                    if result.get("data"):
+                        summary += f". Data includes: {task.get('description', 'research data')}"
+                    
+                    vector_store.store_research_finding(
+                        task_id=task_id,
+                        data_source=data_source,
+                        content=summary,
+                        structured_data={
+                            "count": data_count,
+                            "query_params": query_params,
+                            "description": task.get("description", ""),
+                            "success": True
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to store research finding in vector store: {e}")
 
         except Exception as e:
             logger.error(f"Research task failed: {e}")
@@ -758,7 +845,7 @@ class ResearcherAgent(BaseAgent):
 
         return result
 
-    def execute_next_task(self, memory: ConversationMemory, status_callback=None) -> dict | None:
+    def execute_next_task(self, memory: ConversationMemory, status_callback=None, vector_store=None) -> dict | None:
         """Execute the next pending task (step-by-step execution)."""
         if not memory.current_plan:
             return {"error": "No plan to execute"}
@@ -772,7 +859,7 @@ class ResearcherAgent(BaseAgent):
                 # Check dependencies
                 depends_on = task.get("depends_on", [])
                 if all(dep in memory.completed_tasks for dep in depends_on):
-                    result = self.execute_task(task, memory, status_callback)
+                    result = self.execute_task(task, memory, status_callback, vector_store)
                     memory.last_step_result = result
                     memory.current_step_index = memory.completed_tasks.index(task_id) if task_id in memory.completed_tasks else len(memory.completed_tasks) - 1
                     return result
@@ -915,15 +1002,26 @@ Always reference the actual data in the context when answering.
 
     def __init__(self):
         super().__init__("Clarifier")
-
-    def answer(self, question: str, memory: ConversationMemory) -> str:
-        """Answer a question about the current state or plan."""
+    
+    def answer(self, question: str, memory: ConversationMemory, vector_store=None) -> str:
+        """Answer a question about the current state or plan using context retrieval."""
         plan_info = json.dumps(memory.current_plan, indent=2) if memory.current_plan else "No plan created yet"
 
         completed = memory.completed_tasks or []
         pending = memory.pending_tasks or []
         collected_summary = {k: {"source": v.get("data_source"), "count": v.get("count", 0)}
                            for k, v in memory.collected_data.items()} if memory.collected_data else {}
+        
+        # Retrieve relevant context using vector search if available
+        relevant_context = ""
+        if vector_store:
+            try:
+                relevant_context = vector_store.get_relevant_context(question, max_tokens=1500)
+                if relevant_context and relevant_context != "No relevant context found.":
+                    relevant_context = f"\n## Relevant Context from Previous Conversation\n{relevant_context}\n"
+            except Exception as e:
+                logger.warning(f"Vector search failed: {e}")
+                relevant_context = ""
 
         prompt = f"""{self.SYSTEM_PROMPT}
 
@@ -936,11 +1034,11 @@ Always reference the actual data in the context when answering.
 
 ## Collected Data Summary
 {json.dumps(collected_summary, indent=2)}
-
+{relevant_context}
 ## User Question
 {question}
 
-Provide a clear, helpful answer:"""
+Provide a clear, helpful answer using the available context:"""
 
         return self._generate(prompt, temperature=0.3)
 
@@ -1273,6 +1371,13 @@ class MultiAgentOrchestrator:
         self.session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
         self.memory = ConversationMemory(session_id=self.session_id)
 
+        # Initialize vector store for semantic search and context retrieval
+        try:
+            self.vector_store = VectorStoreManager(session_id=self.session_id)
+        except Exception as e:
+            self.vector_store = None
+            logger.warning(f"Vector store not available: {e}")
+
         # Initialize agents
         self.orchestrator = OrchestratorAgent()
         self.planner = PlannerAgent()
@@ -1298,6 +1403,13 @@ class MultiAgentOrchestrator:
         
         # Add user message to memory
         self.memory.add_message("user", user_message)
+        
+        # Store user message in vector store for context retrieval
+        if self.vector_store:
+            try:
+                self.vector_store.store_message("user", user_message)
+            except Exception as e:
+                logger.warning(f"Failed to store user message in vector store: {e}")
 
         # Route to appropriate agent
         routing = self.orchestrator.route(user_message, self.memory)
@@ -1333,7 +1445,7 @@ class MultiAgentOrchestrator:
 
             if status_callback: status_callback("🔍 **Researcher agent** executing research task...")
 
-            result = self.researcher.execute_next_task(self.memory, status_callback)
+            result = self.researcher.execute_next_task(self.memory, status_callback, self.vector_store)
 
             if result is None:
                 # All tasks complete
@@ -1372,7 +1484,7 @@ class MultiAgentOrchestrator:
             if is_followup and self.memory.current_plan:
                 # User is asking about the existing plan/state
                 if status_callback: status_callback("Answering question about current research state...")
-                answer = self.clarifier.answer(user_message, self.memory)
+                answer = self.clarifier.answer(user_message, self.memory, vector_store=self.vector_store)
                 response["message"] = answer
                 response["requires_input"] = False
             else:
@@ -1385,6 +1497,18 @@ class MultiAgentOrchestrator:
         
         # Add assistant message to memory
         self.memory.add_message("assistant", response.get("message", ""))
+        
+        # Store assistant message in vector store with metadata
+        if self.vector_store:
+            try:
+                metadata = {
+                    "agent": next_agent,
+                    "intent": response.get("intent"),
+                    "requires_input": response.get("requires_input", False)
+                }
+                self.vector_store.store_message("assistant", response.get("message", ""), metadata=metadata)
+            except Exception as e:
+                logger.warning(f"Failed to store assistant message in vector store: {e}")
 
         # Persist state
         self._save_state()
