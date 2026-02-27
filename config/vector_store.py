@@ -42,10 +42,13 @@ class VectorStoreManager:
             return
         
         try:
-            # Initialize Vertex AI
+            # Initialize Vertex AI with quota project
+            import os
+            quota_project = os.getenv('GOOGLE_CLOUD_QUOTA_PROJECT', config.project_id)
+            
             vertexai.init(project=config.project_id, location=config.location)
             
-            # Initialize embedding model
+            # Initialize embedding model (requires AI Platform API enabled)
             self.embedding_model = TextEmbeddingModel.from_pretrained("textembedding-gecko@003")
             
             # Initialize Firestore
@@ -53,7 +56,7 @@ class VectorStoreManager:
             
             logger.info(f"Vector store initialized for session {session_id}")
         except Exception as e:
-            logger.error(f"Failed to initialize vector store: {e}")
+            logger.warning(f"Vector store unavailable (will use memory-only mode): {str(e)[:100]}")
             self.embedding_model = None
             self.db = None
     
