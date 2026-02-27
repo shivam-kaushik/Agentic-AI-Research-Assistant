@@ -652,12 +652,66 @@ class ResearcherAgent(BaseAgent):
                             "gene_variants": all_genes
                         }
 
+                        # Store RAW data before filtering (for visualization)
+                        raw_orkg_data = orkg_matches.to_dict("records")[:30] if not orkg_matches.empty else []
+
+                        # Try to filter with Gemini, but fallback to raw if empty
+                        filtered_orkg = orkg_matches
                         if not orkg_matches.empty:
                             from tools.search_utils import gemini_filter
-                            orkg_matches = gemini_filter(orkg_matches, "object", primary_disease, max_results=30)
+                            try:
+                                filtered_orkg = gemini_filter(orkg_matches, "object", primary_disease, max_results=30)
+                                # If filter returns empty but we had raw data, use raw data
+                                if filtered_orkg.empty and len(raw_orkg_data) > 0:
+                                    logger.info(f"Gemini filter returned empty, using raw ORKG data ({len(raw_orkg_data)} records)")
+                                    result["orkg_data"] = raw_orkg_data[:20]
+                                    result["orkg_count"] = len(raw_orkg_data)
+                                    result["orkg_filter_fallback"] = True
+                                else:
+                                    result["orkg_data"] = filtered_orkg.to_dict("records")[:20]
+                                    result["orkg_count"] = len(filtered_orkg)
+                            except Exception as filter_err:
+                                logger.warning(f"Gemini filter failed: {filter_err}, using raw data")
+                                result["orkg_data"] = raw_orkg_data[:20]
+                                result["orkg_count"] = len(raw_orkg_data)
+                        else:
+                            result["orkg_data"] = []
+                            result["orkg_count"] = 0
 
-                        result["orkg_data"] = orkg_matches.to_dict("records")[:20]
-                        result["orkg_count"] = len(orkg_matches)
+                        # Generate Knowledge Graph visualizations using RAW data (more comprehensive)
+                        try:
+                            from tools.knowledge_graph_viz import create_knowledge_graph, create_gene_disease_graph
+
+                            # Use raw data for visualization (more nodes = better graph)
+                            viz_data = raw_orkg_data if raw_orkg_data else result["orkg_data"]
+
+                            # Create ORKG Knowledge Graph
+                            kg_result = create_knowledge_graph(
+                                orkg_data=viz_data,
+                                disease_name=primary_disease,
+                                gene_symbols=all_genes,
+                                output_dir="outputs",
+                                session_id=memory.session_id,
+                            )
+                            result["knowledge_graph"] = kg_result
+
+                            # Create Gene-Disease Graph from ClinGen data
+                            if "task_1" in memory.collected_data:
+                                clingen_records = memory.collected_data["task_1"].get("data", [])
+                                gd_result = create_gene_disease_graph(
+                                    clingen_data=clingen_records,
+                                    disease_name=primary_disease,
+                                    output_dir="outputs",
+                                    session_id=memory.session_id,
+                                )
+                                result["gene_disease_graph"] = gd_result
+
+                            logger.info(f"Knowledge graphs generated: KG={kg_result.get('success')}, GD={gd_result.get('success') if 'gd_result' in dir() else 'N/A'}")
+
+                        except Exception as viz_error:
+                            logger.warning(f"Knowledge graph visualization failed: {viz_error}")
+                            result["knowledge_graph"] = {"success": False, "error": str(viz_error)}
+
                     except Exception as e:
                         logger.warning(f"ORKG query failed: {e}")
                         result["orkg_data"] = []
@@ -908,7 +962,7 @@ RULES:
         super().__init__("Synthesizer")
 
     def synthesize(self, memory: ConversationMemory) -> dict:
-        """Create a synthesis report with Layer 5 formatting and export it."""
+        """Create a comprehensive synthesis report with ALL data from Steps 1-3."""
         import os
         from datetime import datetime
 
@@ -916,21 +970,208 @@ RULES:
         research_goal = memory.current_plan.get("research_goal", "Research query") if memory.current_plan else "Research query"
         disease_variants = memory.current_plan.get("disease_variants", []) if memory.current_plan else []
         primary_disease = disease_variants[0] if disease_variants else "the target disease"
+        topic_keywords = memory.current_plan.get("topic_keywords", []) if memory.current_plan else []
         completed_steps = len(memory.completed_tasks)
 
-        # Extract ORKG data from task_3 (openalex)
+        # ══════════════════════════════════════════════════════════════
+        # EXTRACT ALL DATA FROM STEPS 1-3
+        # ══════════════════════════════════════════════════════════════
+
+        # Step 1: ClinGen Gene-Disease Data
+        clingen_data = []
+        clingen_stats = {"total": 0, "definitive": 0, "strong": 0, "moderate": 0, "limited": 0}
+        if "task_1" in memory.collected_data:
+            task1 = memory.collected_data["task_1"]
+            clingen_data = task1.get("data", [])
+            clingen_stats["total"] = len(clingen_data)
+            clingen_stats["definitive"] = len(task1.get("definitive", []))
+            clingen_stats["strong"] = len(task1.get("strong", []))
+            clingen_stats["moderate"] = clingen_stats["total"] - clingen_stats["definitive"] - clingen_stats["strong"]
+
+        # Step 2: Literature/Preprint Data
+        preprint_data = []
+        preprint_stats = {"total": 0, "biorxiv": 0, "medrxiv": 0}
+        if "task_2" in memory.collected_data:
+            task2 = memory.collected_data["task_2"]
+            preprint_data = task2.get("data", [])
+            preprint_stats["total"] = len(preprint_data)
+            preprint_stats["biorxiv"] = task2.get("biorxiv_count", 0)
+            preprint_stats["medrxiv"] = task2.get("medrxiv_count", 0)
+
+        # Step 3: Researcher & ORKG Data
+        researcher_data = []
         orkg_data = []
         orkg_concepts = []
+        knowledge_graph_path = None
+        gene_disease_graph_path = None
         if "task_3" in memory.collected_data:
-            task3_data = memory.collected_data["task_3"]
-            orkg_data = task3_data.get("orkg_data", [])
-            for item in orkg_data[:10]:
+            task3 = memory.collected_data["task_3"]
+            researcher_data = task3.get("researchers", task3.get("data", []))
+            orkg_data = task3.get("orkg_data", [])
+            for item in orkg_data[:15]:
                 obj = item.get("object", "")
                 if isinstance(obj, str) and len(obj) > 10:
                     orkg_concepts.append(obj)
+            # Get graph paths
+            kg_info = task3.get("knowledge_graph", {})
+            if kg_info.get("success"):
+                knowledge_graph_path = kg_info.get("graph_path")
+            gd_info = task3.get("gene_disease_graph", {})
+            if gd_info.get("success"):
+                gene_disease_graph_path = gd_info.get("graph_path")
 
-        # Build prompt for synthesis
-        prompt = f"""{self.SYSTEM_PROMPT}
+        # ══════════════════════════════════════════════════════════════
+        # BUILD COMPREHENSIVE REPORT
+        # ══════════════════════════════════════════════════════════════
+        lines = []
+
+        # Header
+        lines.append("══════════════════════════════════════════════════════════════")
+        lines.append("📝  **LAYER 5 — COMPREHENSIVE RESEARCH SYNTHESIS**")
+        lines.append(f"    Synthesizing {completed_steps} completed step(s)...")
+        lines.append("══════════════════════════════════════════════════════════════")
+        lines.append("")
+        lines.append(f"🔬 **Research Query:** {research_goal}")
+        lines.append(f"🦠 **Disease Focus:** {primary_disease}")
+        lines.append(f"🔑 **Topic Keywords:** {', '.join(topic_keywords[:5])}")
+        lines.append(f"📅 **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("")
+
+        # ══════════════════════════════════════════════════════════════
+        # SECTION 1: GENE-DISEASE ASSOCIATIONS (ClinGen)
+        # ══════════════════════════════════════════════════════════════
+        lines.append("═" * 62)
+        lines.append("## 🧬 SECTION 1: Gene-Disease Associations (ClinGen)")
+        lines.append("═" * 62)
+        lines.append("")
+        lines.append(f"**Summary:** {clingen_stats['total']} gene-disease associations found")
+        lines.append(f"  • Definitive: {clingen_stats['definitive']}")
+        lines.append(f"  • Strong: {clingen_stats['strong']}")
+        lines.append(f"  • Moderate/Limited: {clingen_stats['moderate']}")
+        lines.append("")
+
+        if clingen_data:
+            lines.append("**Complete Gene List:**")
+            lines.append("```")
+            lines.append(f"{'Gene':<15} {'Disease':<45} {'MOI':<5} {'Classification':<15}")
+            lines.append("-" * 80)
+            for gene in clingen_data[:20]:
+                g = str(gene.get("Gene_Symbol", ""))[:15]
+                d = str(gene.get("Disease_Label", ""))[:45]
+                m = str(gene.get("MOI", ""))[:5]
+                c = str(gene.get("Classification", ""))[:15]
+                lines.append(f"{g:<15} {d:<45} {m:<5} {c:<15}")
+            lines.append("```")
+        else:
+            lines.append("_No validated gene-disease associations found in ClinGen._")
+        lines.append("")
+
+        # ══════════════════════════════════════════════════════════════
+        # SECTION 2: LITERATURE & PREPRINTS
+        # ══════════════════════════════════════════════════════════════
+        lines.append("═" * 62)
+        lines.append("## 📚 SECTION 2: Recent Literature & Preprints")
+        lines.append("═" * 62)
+        lines.append("")
+        lines.append(f"**Summary:** {preprint_stats['total']} preprints found")
+        lines.append(f"  • bioRxiv: {preprint_stats['biorxiv']}")
+        lines.append(f"  • medRxiv: {preprint_stats['medrxiv']}")
+        lines.append("")
+
+        if preprint_data:
+            lines.append("**Complete Preprint List:**")
+            lines.append("")
+            for i, paper in enumerate(preprint_data[:15], 1):
+                title = paper.get("Title", paper.get("title", "Untitled"))
+                authors = paper.get("Authors", paper.get("authors", "Unknown"))
+                date = paper.get("Date", paper.get("date", "N/A"))
+                source = paper.get("source", "preprint")
+                lines.append(f"**{i}. {title}**")
+                lines.append(f"   _Authors:_ {authors}")
+                lines.append(f"   _Date:_ {date} | _Source:_ {source}")
+                lines.append("")
+        else:
+            lines.append("_No recent preprints found matching the search criteria._")
+        lines.append("")
+
+        # ══════════════════════════════════════════════════════════════
+        # SECTION 3: KNOWLEDGE GRAPH ANALYSIS
+        # ══════════════════════════════════════════════════════════════
+        lines.append("═" * 62)
+        lines.append("## 🔬 SECTION 3: Knowledge Graph Analysis (ORKG)")
+        lines.append("═" * 62)
+        lines.append("")
+        lines.append(f"**Summary:** {len(orkg_data)} knowledge connections found")
+        lines.append("")
+
+        if orkg_concepts:
+            lines.append("**Key Scientific Concepts:**")
+            for i, concept in enumerate(orkg_concepts[:10], 1):
+                lines.append(f"   {i}. {concept}")
+            lines.append("")
+
+            lines.append("**Complete Knowledge Graph Triples:**")
+            lines.append("```")
+            lines.append(f"{'Subject':<40} {'Object (Concept)':<50}")
+            lines.append("-" * 90)
+            for item in orkg_data[:15]:
+                subj = str(item.get("subject", ""))
+                if "/" in subj:
+                    subj = subj.split("/")[-1]
+                subj = subj[:40]
+                obj = str(item.get("object", ""))[:50]
+                lines.append(f"{subj:<40} {obj:<50}")
+            lines.append("```")
+        else:
+            lines.append("_No ORKG knowledge connections found for this disease._")
+        lines.append("")
+
+        # Knowledge Graph Visualizations
+        if knowledge_graph_path or gene_disease_graph_path:
+            lines.append("**Generated Visualizations:**")
+            if knowledge_graph_path:
+                lines.append(f"   📊 ORKG Semantic Network: `{knowledge_graph_path}`")
+            if gene_disease_graph_path:
+                lines.append(f"   🧬 Gene-Disease Graph: `{gene_disease_graph_path}`")
+            lines.append("")
+        lines.append("")
+
+        # ══════════════════════════════════════════════════════════════
+        # SECTION 4: ACTIVE RESEARCHERS
+        # ══════════════════════════════════════════════════════════════
+        lines.append("═" * 62)
+        lines.append("## 👤 SECTION 4: Active Researchers (OpenAlex)")
+        lines.append("═" * 62)
+        lines.append("")
+        lines.append(f"**Summary:** {len(researcher_data)} researchers found")
+        lines.append("")
+
+        if researcher_data:
+            lines.append("**Complete Researcher List:**")
+            lines.append("```")
+            lines.append(f"{'Name':<35} {'H-Index':<10} {'Citations':<12} {'Institution':<35}")
+            lines.append("-" * 92)
+            for r in researcher_data[:15]:
+                name = str(r.get("display_name", r.get("name", "Unknown")))[:35]
+                h = str(r.get("h_index", "N/A"))[:10]
+                c = str(r.get("cited_by_count", "N/A"))[:12]
+                inst = str(r.get("last_known_institution", r.get("institution", "Unknown")))[:35]
+                lines.append(f"{name:<35} {h:<10} {c:<12} {inst:<35}")
+            lines.append("```")
+        else:
+            lines.append("_No researchers found matching the criteria._")
+        lines.append("")
+
+        # ══════════════════════════════════════════════════════════════
+        # SECTION 5: AI ANALYSIS & RECOMMENDATIONS
+        # ══════════════════════════════════════════════════════════════
+        lines.append("═" * 62)
+        lines.append("## 🤖 SECTION 5: AI Analysis & Recommendations")
+        lines.append("═" * 62)
+        lines.append("")
+
+        # Generate AI analysis using all collected data
+        analysis_prompt = f"""{self.SYSTEM_PROMPT}
 
 ## Research Query
 {research_goal}
@@ -938,46 +1179,39 @@ RULES:
 ## Disease Focus
 {primary_disease}
 
-## Collected Data Summary
-{json.dumps({k: {
-    "source": v.get("data_source"),
-    "count": v.get("count"),
-    "sample": v.get("data", [])[:5],
-    "researchers": v.get("researchers", [])[:5] if v.get("data_source") == "openalex" else None,
-} for k, v in memory.collected_data.items()}, indent=2, default=str)}
+## ClinGen Gene Data ({clingen_stats['total']} genes)
+{json.dumps(clingen_data[:10], indent=2, default=str)}
 
-## Knowledge Graph Data (ORKG)
-Total ORKG connections: {len(orkg_data)}
-Key Scientific Concepts from ORKG:
-{json.dumps(orkg_concepts[:10], indent=2) if orkg_concepts else "No ORKG concepts found for this disease."}
+## Preprint Data ({preprint_stats['total']} papers)
+{json.dumps([{"title": p.get("Title", p.get("title")), "authors": p.get("Authors", p.get("authors"))} for p in preprint_data[:10]], indent=2, default=str)}
 
-Full ORKG Data (first 10):
-{json.dumps(orkg_data[:10], indent=2, default=str) if orkg_data else "[]"}
+## ORKG Concepts ({len(orkg_concepts)} concepts)
+{json.dumps(orkg_concepts[:10], indent=2)}
 
-Write a research synthesis with these exact 5 sections:
-1. 🎯 Direct Answer (2-3 sentences answering the original query)
-2. 🧬 Gene & Biological Context (what ClinGen found, genetic basis)
-3. 📚 Current Research Landscape (preprints, Q&A findings, recent themes)
-4. 🔬 Knowledge Graph Connections (ORKG analysis, semantic relationships, research directions)
-5. 👤 Key Researchers to Follow (numbered list with H-index, citations, institution)
+## Researcher Data ({len(researcher_data)} researchers)
+{json.dumps([{"name": r.get("display_name"), "h_index": r.get("h_index"), "citations": r.get("cited_by_count")} for r in researcher_data[:10]], indent=2, default=str)}
 
-Be specific. Reference actual data values. Keep it concise."""
+Write a research synthesis with these exact 5 sections. Be SPECIFIC and reference actual data values."""
 
-        report_text = self._generate(prompt, temperature=0.3)
-
-        # Build formatted output with Layer 5 header
-        lines = []
-        lines.append("══════════════════════════════════════════════════════════════")
-        lines.append("📝  **LAYER 5 — SYNTHESIS**")
-        lines.append(f"    Gemini synthesising {completed_steps} completed step(s)...")
-        lines.append("══════════════════════════════════════════════════════════════")
+        ai_analysis = self._generate(analysis_prompt, temperature=0.3)
+        lines.append(ai_analysis)
         lines.append("")
-        lines.append("══════════════════════════════════════════════════════════════")
-        lines.append(f"🔬 **QUERY**    : {research_goal}")
-        lines.append(f"🤖 **MODEL**    : gemini-2.5-pro")
-        lines.append("══════════════════════════════════════════════════════════════")
+
+        # ══════════════════════════════════════════════════════════════
+        # FOOTER
+        # ══════════════════════════════════════════════════════════════
+        lines.append("═" * 62)
+        lines.append("## 📋 Report Metadata")
+        lines.append("═" * 62)
+        lines.append(f"• **Session ID:** {memory.session_id}")
+        lines.append(f"• **Steps Completed:** {completed_steps}")
+        lines.append(f"• **Total Data Points:** {clingen_stats['total'] + preprint_stats['total'] + len(orkg_data) + len(researcher_data)}")
+        if knowledge_graph_path:
+            lines.append(f"• **ORKG Graph:** {knowledge_graph_path}")
+        if gene_disease_graph_path:
+            lines.append(f"• **Gene-Disease Graph:** {gene_disease_graph_path}")
         lines.append("")
-        lines.append(report_text)
+        lines.append("_Generated by QueryQuest Co-Investigator v9.0_")
 
         formatted_report = "\n".join(lines)
 
@@ -993,7 +1227,9 @@ Be specific. Reference actual data values. Keep it concise."""
 
         return {
             "report": formatted_report,
-            "export_path": filepath
+            "export_path": filepath,
+            "knowledge_graph_path": knowledge_graph_path,
+            "gene_disease_graph_path": gene_disease_graph_path,
         }
 
 
@@ -1658,9 +1894,81 @@ class MultiAgentOrchestrator:
                     for i, concept in enumerate(concepts[:5], 1):
                         lines.append(f"   {i}. {concept}")
                     lines.append("")
+
             else:
-                lines.append("⚠️ No relevant ORKG connections found matching the disease and topic criteria.")
-                lines.append("   _Tip: This may indicate limited semantic coverage for this specific topic._")
+                lines.append("⚠️ No relevant ORKG connections found after filtering.")
+                lines.append(f"   _Raw matches: {raw_count} — using raw data for visualization._")
+                lines.append("")
+
+            # ══════════════════════════════════════════════════════════════
+            # KNOWLEDGE GRAPH VISUALIZATIONS (always show, even with raw data)
+            # ══════════════════════════════════════════════════════════════
+            lines.append("══════════════════════════════════════════════════════════════")
+            lines.append("📊  **KNOWLEDGE GRAPH VISUALIZATIONS**")
+            lines.append("══════════════════════════════════════════════════════════════")
+            lines.append("")
+
+            # Show fallback notice if using raw data
+            if result.get("orkg_filter_fallback"):
+                lines.append("ℹ️  _Using raw ORKG data for visualization (filter returned empty)_")
+                lines.append("")
+
+            # ORKG Knowledge Graph
+            kg_info = result.get("knowledge_graph", {})
+            if kg_info.get("success"):
+                import os
+                kg_path = os.path.abspath(kg_info.get("graph_path")).replace("\\", "/")
+                lines.append("✅ **ORKG Semantic Network Graph Generated:**")
+                lines.append(f"![ORKG Semantic Network Graph](file:///{kg_path})")
+                lines.append(f"   📍 Nodes: {kg_info.get('node_count', 0)} | Edges: {kg_info.get('edge_count', 0)}")
+                
+                concepts = kg_info.get('concept_nodes', [])
+                if concepts:
+                    lines.append(f"   🧬 Concepts: {', '.join(concepts[:5])}")
+                    
+                    # Generate dynamic analysis
+                    if len(concepts) > 0:
+                        analysis_prompt = f"Briefly analyze these semantic concepts related to {primary_disease} found in a knowledge graph: {', '.join(concepts)}. What do they suggest about potential research directions or mechanisms? Keep it to 2-3 short sentences."
+                        try:
+                            analysis = self.synthesizer._generate(analysis_prompt)
+                            lines.append("\n**📈 Graph Analysis:**")
+                            lines.append(analysis.strip())
+                        except Exception as e:
+                            logger.warning(f"Failed to generate graph analysis: {e}")
+                
+                lines.append("")
+            else:
+                kg_error = kg_info.get("error", "No data available")
+                lines.append(f"⚠️ ORKG Graph: {kg_error}")
+                lines.append("")
+            # Gene-Disease Graph
+            gd_info = result.get("gene_disease_graph", {})
+            if gd_info.get("success"):
+                import os
+                gd_path = os.path.abspath(gd_info.get("graph_path")).replace("\\", "/")
+                lines.append("✅ **Gene-Disease Relationship Graph Generated:**")
+                lines.append(f"![Gene-Disease Relationship Graph](file:///{gd_path})")
+                lines.append(f"   📍 Nodes: {gd_info.get('node_count', 0)} | Edges: {gd_info.get('edge_count', 0)}")
+                
+                # Generate dynamic analysis
+                clingen_data = []
+                if "task_1" in self.memory.collected_data:
+                    clingen_data = self.memory.collected_data["task_1"].get("data", [])
+                    
+                if clingen_data:
+                    top_genes = [g.get('Gene_Symbol') for g in clingen_data[:5] if g.get('Gene_Symbol')]
+                    analysis_prompt = f"Briefly analyze this gene-disease relationship graph for {primary_disease}. The primary genes identified are: {', '.join(top_genes)}. What does this suggest about the genetic basis of the disease? Keep it to 2-3 short sentences."
+                    try:
+                        analysis = self.synthesizer._generate(analysis_prompt)
+                        lines.append("\n**📈 Graph Analysis:**")
+                        lines.append(analysis.strip())
+                    except Exception as e:
+                        logger.warning(f"Failed to generate graph analysis: {e}")
+                
+                lines.append("")
+            elif gd_info:
+                gd_error = gd_info.get("error", "No ClinGen data")
+                lines.append(f"⚠️ Gene-Disease Graph: {gd_error}")
                 lines.append("")
 
             # OBSERVE
