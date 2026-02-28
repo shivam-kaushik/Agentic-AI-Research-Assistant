@@ -11,6 +11,8 @@
 
 ## Overview
 
+[![BenchSci Co-Investigator Demo](https://img.youtube.com/vi/l4p95HiO7Kc/0.jpg)](https://www.youtube.com/watch?v=l4p95HiO7Kc)
+
 Co-Investigator is an intelligent biomedical research assistant that uses a multi-agent architecture to help scientists discover gene-disease associations, find relevant literature, and identify key researchers in their field. Built on Google Cloud's Vertex AI with Gemini models, it provides a conversational interface with Human-in-the-Loop (HITL) checkpoints and semantic search capabilities.
 
 ### Key Highlights
@@ -855,4 +857,4 @@ For questions or support, please open an issue on GitHub or contact the maintain
 
 ---
 
-**Built by the Shivam Kaushik for BenchSci Hackathon**
+**Built by the Shivam & Ishika for BenchSci Hackathon**
