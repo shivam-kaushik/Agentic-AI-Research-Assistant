@@ -855,4 +855,4 @@ For questions or support, please open an issue on GitHub or contact the maintain
 
 ---
 
-**Built by the BenchSci Team**
+**Built by the Shivam Kaushik for BenchSci Hackathon**
